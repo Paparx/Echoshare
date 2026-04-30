@@ -7,7 +7,7 @@ export interface User {
   flatNumber: string;
   role: Role;
   badges: string[];
-  avatar?: string;
+  imageUrl?: string;
   points: number;
 }
 

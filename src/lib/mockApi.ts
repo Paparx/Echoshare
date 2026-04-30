@@ -43,9 +43,24 @@ export const mockApi = {
   },
 
   updateProfile: async (_userId: string, updates: Partial<User>): Promise<User> => {
-    const { data } = await api.put('/profile', updates);
-    localStorage.setItem('ecoshare_current_user', JSON.stringify(data));
-    return data;
+    // Map camelCase to snake_case for backend
+    const mappedUpdates = {
+      name: updates.name,
+      email: updates.email,
+      flat_number: updates.flatNumber,
+      image_url: updates.imageUrl
+    };
+    const { data } = await api.put('/profile', mappedUpdates);
+    
+    // Map snake_case back to camelCase for frontend
+    const result: User = {
+      ...data,
+      flatNumber: data.flat_number,
+      imageUrl: data.image_url
+    };
+    
+    localStorage.setItem('ecoshare_current_user', JSON.stringify(result));
+    return result;
   },
 
   // --- ITEMS ---

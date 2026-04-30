@@ -17,6 +17,16 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
+// Helper to extract public_id from Cloudinary URL
+const getPublicId = (url) => {
+  if (!url || !url.includes('cloudinary.com')) return null;
+  const parts = url.split('/');
+  const fileName = parts.pop();
+  const folder = parts.pop();
+  const publicId = fileName.split('.')[0];
+  return `${folder}/${publicId}`;
+};
+
 // Helper to upload to Cloudinary
 const uploadToCloudinary = async (base64Image) => {
   if (!base64Image || !base64Image.startsWith('data:image')) return base64Image;
@@ -27,7 +37,18 @@ const uploadToCloudinary = async (base64Image) => {
     return uploadResponse.secure_url;
   } catch (err) {
     console.error('Cloudinary upload error:', err);
-    return base64Image; // Fallback to base64 if upload fails
+    return base64Image;
+  }
+};
+
+// Helper to delete from Cloudinary
+const deleteFromCloudinary = async (url) => {
+  const publicId = getPublicId(url);
+  if (!publicId) return;
+  try {
+    await cloudinary.uploader.destroy(publicId);
+  } catch (err) {
+    console.error('Cloudinary deletion error:', err);
   }
 };
 
@@ -63,7 +84,7 @@ const initDb = async () => {
         flat_number TEXT,
         role TEXT DEFAULT 'user',
         badges TEXT[] DEFAULT '{}',
-        avatar TEXT,
+        image_url TEXT,
         points INTEGER DEFAULT 0,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
@@ -106,7 +127,7 @@ const initDb = async () => {
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log('Database tables initialized');
+    console.log('Database tables initialized successfully');
   } catch (err) {
     console.error('Error initializing database:', err);
   }
@@ -131,16 +152,21 @@ const authenticateToken = (req, res, next) => {
 app.post('/api/register', async (req, res) => {
   const { name, email, password, flatNumber } = req.body;
   try {
+    // Production Safety: Check if this is the very first user. If so, make them admin.
+    const userCount = await pool.query('SELECT count(*) FROM users');
+    const role = (parseInt(userCount.rows[0].count) === 0) ? 'admin' : 'user';
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      'INSERT INTO users (name, email, password, flat_number) VALUES ($1, $2, $3, $4) RETURNING id, name, email, flat_number, role, badges, points, avatar',
-      [name, email, hashedPassword, flatNumber]
+      'INSERT INTO users (name, email, password, flat_number, role) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, flat_number, role, badges, points, image_url',
+      [name, email, hashedPassword, flatNumber, role]
     );
     const user = result.rows[0];
     const token = jwt.sign({ id: user.id, role: user.role }, process.env.JWT_SECRET);
     res.status(201).json({ user, token });
   } catch (err) {
-    res.status(400).json({ error: 'Email already exists' });
+    console.error('Registration error:', err);
+    res.status(400).json({ error: 'Email already exists or invalid data' });
   }
 });
 
@@ -162,14 +188,19 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.put('/api/profile', authenticateToken, async (req, res) => {
-  let { name, email, flat_number, avatar } = req.body;
+  let { name, email, flat_number, image_url } = req.body;
   try {
-    if (avatar && avatar.startsWith('data:image')) {
-      avatar = await uploadToCloudinary(avatar);
+    if (image_url && image_url.startsWith('data:image')) {
+      // Get old image to delete it
+      const oldUserResult = await pool.query('SELECT image_url FROM users WHERE id = $1', [req.user.id]);
+      if (oldUserResult.rows[0]?.image_url) {
+        await deleteFromCloudinary(oldUserResult.rows[0].image_url);
+      }
+      image_url = await uploadToCloudinary(image_url);
     }
     const result = await pool.query(
-      'UPDATE users SET name = COALESCE($1, name), email = COALESCE($2, email), flat_number = COALESCE($3, flat_number), avatar = COALESCE($4, avatar) WHERE id = $5 RETURNING *',
-      [name, email, flat_number, avatar, req.user.id]
+      'UPDATE users SET name = COALESCE($1, name), email = COALESCE($2, email), flat_number = COALESCE($3, flat_number), image_url = COALESCE($4, image_url) WHERE id = $5 RETURNING *',
+      [name, email, flat_number, image_url, req.user.id]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -216,6 +247,7 @@ app.put('/api/items/:id', authenticateToken, async (req, res) => {
     if (!oldItem) return res.status(404).json({ error: 'Item not found' });
 
     if (imageUrl && imageUrl.startsWith('data:image')) {
+      if (oldItem.image_url) await deleteFromCloudinary(oldItem.image_url);
       imageUrl = await uploadToCloudinary(imageUrl);
     }
     
@@ -239,7 +271,10 @@ app.delete('/api/items/:id', authenticateToken, async (req, res) => {
   try {
     const itemResult = await pool.query('SELECT * FROM items WHERE id = $1', [req.params.id]);
     const item = itemResult.rows[0];
+    if (!item) return res.sendStatus(404);
     if (req.user.role !== 'admin' && item.owner_id !== req.user.id) return res.sendStatus(403);
+    
+    if (item.image_url) await deleteFromCloudinary(item.image_url);
     
     if (!item.available) {
        await pool.query('UPDATE users SET points = points - 10 WHERE id = $1', [item.owner_id]);
@@ -297,7 +332,9 @@ app.post('/api/events/:id/join', authenticateToken, async (req, res) => {
 app.put('/api/events/:id', authenticateToken, async (req, res) => {
   let { title, description, date, location, imageUrl } = req.body;
   try {
+    const oldEventResult = await pool.query('SELECT image_url FROM events WHERE id = $1', [req.params.id]);
     if (imageUrl && imageUrl.startsWith('data:image')) {
+      if (oldEventResult.rows[0]?.image_url) await deleteFromCloudinary(oldEventResult.rows[0].image_url);
       imageUrl = await uploadToCloudinary(imageUrl);
     }
     const result = await pool.query(
@@ -314,7 +351,10 @@ app.delete('/api/events/:id', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM events WHERE id = $1', [req.params.id]);
     const event = result.rows[0];
+    if (!event) return res.sendStatus(404);
     if (req.user.role !== 'admin' && event.created_by !== req.user.id) return res.sendStatus(403);
+    
+    if (event.image_url) await deleteFromCloudinary(event.image_url);
     
     await pool.query('UPDATE users SET points = points - 30 WHERE id = $1', [event.created_by]);
     await pool.query('DELETE FROM events WHERE id = $1', [req.params.id]);
@@ -328,7 +368,10 @@ app.delete('/api/cleanup/:id', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM cleanup_places WHERE id = $1', [req.params.id]);
     const place = result.rows[0];
+    if (!place) return res.sendStatus(404);
     if (req.user.role !== 'admin' && place.posted_by !== req.user.id) return res.sendStatus(403);
+    
+    if (place.image_url) await deleteFromCloudinary(place.image_url);
     
     if (place.status === 'completed') {
       await pool.query('UPDATE users SET points = points - 20 WHERE id = $1', [place.posted_by]);
@@ -422,7 +465,7 @@ app.get('/api/leaderboard', async (req, res) => {
 
 // Static Hosting
 app.use(express.static(path.join(__dirname, 'dist')));
-app.get('*', (req, res) => {
+app.get( (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
