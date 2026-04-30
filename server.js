@@ -6,8 +6,30 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { v2 as cloudinary } from 'cloudinary';
 
 dotenv.config();
+
+// Cloudinary Configuration
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+// Helper to upload to Cloudinary
+const uploadToCloudinary = async (base64Image) => {
+  if (!base64Image || !base64Image.startsWith('data:image')) return base64Image;
+  try {
+    const uploadResponse = await cloudinary.uploader.upload(base64Image, {
+      folder: 'ecoshare_colony'
+    });
+    return uploadResponse.secure_url;
+  } catch (err) {
+    console.error('Cloudinary upload error:', err);
+    return base64Image; // Fallback to base64 if upload fails
+  }
+};
 
 const { Pool } = pg;
 const __filename = fileURLToPath(import.meta.url);
@@ -140,8 +162,11 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.put('/api/profile', authenticateToken, async (req, res) => {
-  const { name, email, flat_number, avatar } = req.body;
+  let { name, email, flat_number, avatar } = req.body;
   try {
+    if (avatar && avatar.startsWith('data:image')) {
+      avatar = await uploadToCloudinary(avatar);
+    }
     const result = await pool.query(
       'UPDATE users SET name = COALESCE($1, name), email = COALESCE($2, email), flat_number = COALESCE($3, flat_number), avatar = COALESCE($4, avatar) WHERE id = $5 RETURNING *',
       [name, email, flat_number, avatar, req.user.id]
@@ -168,13 +193,15 @@ app.get('/api/items', async (req, res) => {
 });
 
 app.post('/api/items', authenticateToken, async (req, res) => {
-  const { title, description, category, type, imageUrl } = req.body;
+  let { title, description, category, type, imageUrl } = req.body;
   try {
+    if (imageUrl && imageUrl.startsWith('data:image')) {
+      imageUrl = await uploadToCloudinary(imageUrl);
+    }
     const result = await pool.query(
       'INSERT INTO items (title, description, category, type, owner_id, image_url) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
       [title, description, category, type, req.user.id, imageUrl]
     );
-    // Auto points logic could go here
     res.status(201).json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -182,14 +209,19 @@ app.post('/api/items', authenticateToken, async (req, res) => {
 });
 
 app.put('/api/items/:id', authenticateToken, async (req, res) => {
-  const { available } = req.body;
+  let { available, title, description, category, type, imageUrl } = req.body;
   try {
     const oldItemResult = await pool.query('SELECT * FROM items WHERE id = $1', [req.params.id]);
     const oldItem = oldItemResult.rows[0];
+    if (!oldItem) return res.status(404).json({ error: 'Item not found' });
+
+    if (imageUrl && imageUrl.startsWith('data:image')) {
+      imageUrl = await uploadToCloudinary(imageUrl);
+    }
     
     const result = await pool.query(
-      'UPDATE items SET available = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
-      [available, req.params.id]
+      'UPDATE items SET available = COALESCE($1, available), title = COALESCE($2, title), description = COALESCE($3, description), category = COALESCE($4, category), type = COALESCE($5, type), image_url = COALESCE($6, image_url), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
+      [available, title, description, category, type, imageUrl, req.params.id]
     );
 
     // Award points if borrowed
@@ -236,8 +268,11 @@ app.get('/api/events', async (req, res) => {
 });
 
 app.post('/api/events', authenticateToken, async (req, res) => {
-  const { title, description, date, location, imageUrl } = req.body;
+  let { title, description, date, location, imageUrl } = req.body;
   try {
+    if (imageUrl && imageUrl.startsWith('data:image')) {
+      imageUrl = await uploadToCloudinary(imageUrl);
+    }
     const result = await pool.query(
       'INSERT INTO events (title, description, date, location, created_by, image_url) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
       [title, description, date, location, req.user.id, imageUrl]
@@ -260,10 +295,13 @@ app.post('/api/events/:id/join', authenticateToken, async (req, res) => {
 });
 
 app.put('/api/events/:id', authenticateToken, async (req, res) => {
-  const { title, description, date, location, imageUrl } = req.body;
+  let { title, description, date, location, imageUrl } = req.body;
   try {
+    if (imageUrl && imageUrl.startsWith('data:image')) {
+      imageUrl = await uploadToCloudinary(imageUrl);
+    }
     const result = await pool.query(
-      'UPDATE events SET title = $1, description = $2, date = $3, location = $4, image_url = $5, updated_at = CURRENT_TIMESTAMP WHERE id = $6 RETURNING *',
+      'UPDATE events SET title = COALESCE($1, title), description = COALESCE($2, description), date = COALESCE($3, date), location = COALESCE($4, location), image_url = COALESCE($5, image_url), updated_at = CURRENT_TIMESTAMP WHERE id = $6 RETURNING *',
       [title, description, date, location, imageUrl, req.params.id]
     );
     res.json(result.rows[0]);
@@ -319,8 +357,11 @@ app.get('/api/cleanup', async (req, res) => {
 });
 
 app.post('/api/cleanup', authenticateToken, async (req, res) => {
-  const { title, description, location, imageUrl } = req.body;
+  let { title, description, location, imageUrl } = req.body;
   try {
+    if (imageUrl && imageUrl.startsWith('data:image')) {
+      imageUrl = await uploadToCloudinary(imageUrl);
+    }
     const result = await pool.query(
       'INSERT INTO cleanup_places (title, description, location, posted_by, image_url) VALUES ($1, $2, $3, $4, $5) RETURNING *',
       [title, description, location, req.user.id, imageUrl]
@@ -381,7 +422,7 @@ app.get('/api/leaderboard', async (req, res) => {
 
 // Static Hosting
 app.use(express.static(path.join(__dirname, 'dist')));
-app.get( (req, res) => {
+app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
